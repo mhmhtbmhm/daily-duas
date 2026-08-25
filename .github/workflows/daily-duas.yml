@@ -1,0 +1,59 @@
+name: Daily Duas Auto-Publish
+
+on:
+  schedule:
+    # الأوقات بتوقيت UTC. المغرب عادة UTC+1 (وUTC+0 خلال رمضان).
+    - cron: "0 6 * * *"    # ~ 7:00 صباحا بتوقيت المغرب  -> دعاء الصباح
+    - cron: "0 12 * * *"   # ~ 1:00 الظهر بتوقيت المغرب  -> دعاء الظهر
+    - cron: "0 17 * * *"   # ~ 6:00 مساء بتوقيت المغرب   -> دعاء المساء
+  workflow_dispatch:        # يسمح بتشغيل يدوي من تبويب Actions للتجربة
+    inputs:
+      slot:
+        description: "الفترة (morning / afternoon / evening)"
+        required: false
+        default: "general"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Determine time slot
+        id: slot
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "slot=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
+          else
+            HOUR=$(date -u +%H)
+            if [ "$HOUR" -eq 6 ]; then
+              echo "slot=morning" >> "$GITHUB_OUTPUT"
+            elif [ "$HOUR" -eq 12 ]; then
+              echo "slot=afternoon" >> "$GITHUB_OUTPUT"
+            else
+              echo "slot=evening" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate and publish dua
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_BRANCH: ${{ github.ref_name }}
+          DUA_SLOT: ${{ steps.slot.outputs.slot }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python publish.py
