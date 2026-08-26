@@ -56,7 +56,7 @@ jobs:
           GITHUB_BRANCH: ${{ github.ref_name }}
           DUA_SLOT: ${{ steps.slot.outputs.slot }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-             YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-   YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-   YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
         run: python publish.py
