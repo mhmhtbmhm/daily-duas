@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import requests
 
 from generate_image import generate_dua_image
+from generate_video import generate_dua_video
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DUAS_PATH = os.path.join(BASE_DIR, "duas.json")
@@ -109,6 +110,19 @@ def post_to_instagram(image_url, caption):
     return resp2.json()
 
 
+def post_to_youtube(video_path, dua_text, source):
+    from youtube_upload import upload_short
+    title = (dua_text[:80] + "…") if len(dua_text) > 80 else dua_text
+    description = dua_text + (f"\n\n({source})" if source else "") + \
+        "\n\n#دعاء #shorts #اذكار #إسلام"
+    return upload_short(
+        video_path,
+        title=title,
+        description=description,
+        tags=["دعاء", "اذكار", "shorts", "اسلام"],
+    )
+
+
 def main():
     missing = [name for name in ["FB_PAGE_ID", "FB_PAGE_TOKEN", "IG_USER_ID", "GITHUB_REPOSITORY"]
                if not os.environ.get(name)]
@@ -157,6 +171,23 @@ def main():
             print("❌ خطأ فـ Instagram:", e, file=sys.stderr)
     else:
         print("⏭️  تخطينا النشر الفعلي (السكريبت خدام محليا/تجربة).")
+
+    # --- YouTube Short (اختياري، غير كاين إلا كانت متغيرات YT_* موجودة) ---
+    yt_missing = [name for name in ["YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"]
+                  if not os.environ.get(name)]
+    if not yt_missing:
+        video_filename = f"dua_{SLOT}_{timestamp}.mp4"
+        video_filepath = os.path.join(POSTS_DIR, video_filename)
+        try:
+            generate_dua_video(dua["text"], category=SLOT, source=dua.get("source", ""),
+                                output_path=video_filepath)
+            print(f"✅ الفيديو تولد: {video_filepath}")
+            yt_result = post_to_youtube(video_filepath, dua["text"], dua.get("source", ""))
+            print("✅ تنشر فـ YouTube:", yt_result.get("id"))
+        except Exception as e:
+            print("❌ خطأ فـ YouTube:", e, file=sys.stderr)
+    else:
+        print(f"⏭️  تخطينا YouTube (متغيرات ناقصة: {yt_missing})")
 
 
 if __name__ == "__main__":
