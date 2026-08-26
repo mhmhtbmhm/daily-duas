@@ -53,40 +53,45 @@ def _wrap_arabic(draw, text, font, max_width):
     return lines
 
 
-def generate_dua_image(text, category="general", source="", output_path="output.png"):
+def generate_dua_image(text, category="general", source="", output_path="output.png", width=SIZE, height=SIZE):
     theme = THEMES.get(category, THEMES["general"])
-    img = _vertical_gradient((SIZE, SIZE), theme["top"], theme["bottom"])
+    img = _vertical_gradient((width, height), theme["top"], theme["bottom"])
     draw = ImageDraw.Draw(img)
 
     # إطار زخرفي خفيف
     margin = 40
     draw.rectangle(
-        [margin, margin, SIZE - margin, SIZE - margin],
+        [margin, margin, width - margin, height - margin],
         outline=(255, 255, 255, 180),
         width=3,
     )
     inner_margin = 55
     draw.rectangle(
-        [inner_margin, inner_margin, SIZE - inner_margin, SIZE - inner_margin],
+        [inner_margin, inner_margin, width - inner_margin, height - inner_margin],
         outline=(255, 255, 255, 120),
         width=1,
     )
 
     # العنوان العلوي
-    label_font = ImageFont.truetype(FONT_PATH, 46)
+    label_font_size = int(46 * (width / SIZE))
+    label_font = ImageFont.truetype(FONT_PATH, label_font_size)
     label = theme["label"]
     bbox = draw.textbbox((0, 0), label, font=label_font, direction="rtl")
     lw = bbox[2] - bbox[0]
-    draw.text(((SIZE - lw) / 2, 110), label, font=label_font, fill=(255, 255, 255), direction="rtl")
+    label_y = int(height * 0.10)
+    draw.text(((width - lw) / 2, label_y), label, font=label_font, fill=(255, 255, 255), direction="rtl")
 
     # خط فاصل صغير
-    draw.line([(SIZE / 2 - 60, 190), (SIZE / 2 + 60, 190)], fill=(255, 255, 255), width=3)
+    line_y = label_y + label_font_size + 30
+    draw.line([(width / 2 - 60, line_y), (width / 2 + 60, line_y)], fill=(255, 255, 255), width=3)
 
     # النص الرئيسي — نحسب أفضل حجم خط يدخل فالمساحة
-    max_text_width = SIZE - 220
-    max_text_height = 620
-    font_size = 66
-    while font_size > 30:
+    max_text_width = width - 220
+    text_zone_top = line_y + 90
+    text_zone_bottom = int(height * 0.80)
+    max_text_height = text_zone_bottom - text_zone_top
+    font_size = int(66 * (width / SIZE)) + 10
+    while font_size > 26:
         font = ImageFont.truetype(FONT_PATH, font_size)
         lines = _wrap_arabic(draw, text, font, max_text_width)
         line_height = font.getbbox("العربية", direction="rtl")[3] + 22
@@ -95,21 +100,23 @@ def generate_dua_image(text, category="general", source="", output_path="output.
             break
         font_size -= 2
 
-    start_y = 280 + (max_text_height - line_height * len(lines)) / 2
+    start_y = text_zone_top + (max_text_height - line_height * len(lines)) / 2
     y = start_y
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font, direction="rtl")
         lw = bbox[2] - bbox[0]
-        draw.text(((SIZE - lw) / 2, y), line, font=font, fill=(255, 255, 255), direction="rtl")
+        draw.text(((width - lw) / 2, y), line, font=font, fill=(255, 255, 255), direction="rtl")
         y += line_height
 
     # المصدر أسفل الصورة
     if source:
-        source_font = ImageFont.truetype(FONT_PATH, 34)
+        source_font_size = int(34 * (width / SIZE))
+        source_font = ImageFont.truetype(FONT_PATH, source_font_size)
         source_text = f"« {source} »"
         bbox = draw.textbbox((0, 0), source_text, font=source_font, direction="rtl")
         lw = bbox[2] - bbox[0]
-        draw.text(((SIZE - lw) / 2, SIZE - 170), source_text, font=source_font, fill=(255, 255, 255), direction="rtl")
+        draw.text(((width - lw) / 2, height - int(height * 0.13)), source_text, font=source_font,
+                   fill=(255, 255, 255), direction="rtl")
 
     img.save(output_path, "PNG")
     return output_path
