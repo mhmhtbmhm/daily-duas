@@ -2,8 +2,8 @@
 publish.py
 - كيختار الدعاء المناسب (صباح/ظهر/مسا) بالتناوب بلا تكرار
 - كيولد الصورة
-- كيرفعها للريبو (باش يكون عندها رابط عمومي عبر jsdelivr CDN)
-- كينشرها فـ Facebook Page و Instagram Business Account
+- كيرفعها للريبو (باش يكون عندها رابط عمومي عبر jsdelivr CDN، مستعمل لـ Instagram)
+- كينشرها فـ Facebook Page (رفع مباشر/binary) و Instagram Business Account (عبر رابط)
 """
 import os
 import json
@@ -75,22 +75,17 @@ def git_commit_and_push(filepaths, message):
 
 def public_image_url(relative_path):
     """
-    كنستعملو jsdelivr بدل raw.githubusercontent.com:
-    - CDN حقيقية، content-type صحيح، وما فيهاش تأخر تزامن بين edges
-      اللي كان كيسبب "Missing or invalid image file" عند Facebook.
+    كنستعملو jsdelivr (CDN حقيقية) لأجل Instagram، اللي كيتطلب رابط عمومي
+    (raw.githubusercontent.com عندو تأخر تزامن بين edges كيسبب مشاكل).
     """
     if not GITHUB_REPOSITORY:
         raise RuntimeError("GITHUB_REPOSITORY environment variable is missing")
-    # jsdelivr كيقبل أي '/' فالمسار مباشرة
     relative_path = relative_path.replace(os.sep, "/")
     return f"https://cdn.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_BRANCH}/{relative_path}"
 
 
 def purge_jsdelivr_cache(relative_path):
-    """
-    jsdelivr كيدير cache للملفات. كنطلبو purge باش يجيب آخر نسخة
-    بدل ما يبقى يخدم نسخة قديمة (أو 404 من قبل ما يتپوش الملف).
-    """
+    """كنطلبو purge باش jsdelivr يجيب آخر نسخة ديال الملف بدل نسخة قديمة/غير موجودة."""
     relative_path = relative_path.replace(os.sep, "/")
     purge_url = f"https://purge.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_BRANCH}/{relative_path}"
     try:
@@ -102,8 +97,8 @@ def purge_jsdelivr_cache(relative_path):
 def wait_until_url_is_live(url, retries=8, delay=5):
     """
     كنتأكدو بلي الرابط رد فعلا بصورة صحيحة (status 200 + content-type image/*)
-    قبل ما نعطيوه لـ Facebook/Instagram. كنستعملو GET (ماشي HEAD) باش
-    نتأكدو من المحتوى الحقيقي اللي غادي يشوفه Facebook.
+    قبل ما نعطيوه لـ Instagram. كنستعملو GET (ماشي HEAD) باش نتأكدو من
+    المحتوى الحقيقي.
     """
     for attempt in range(1, retries + 1):
         try:
@@ -129,34 +124,121 @@ def _log_response_error(prefix, resp):
     print(f"❌ {prefix} — status={resp.status_code} body={payload}", file=sys.stderr)
 
 
-def post_to_facebook(image_url, caption, retries=3, delay=5):
+def _upload_unpublished_photo(local_filepath, retries=3, delay=5):
     """
-    كنعاودو المحاولة إلا كان الخطأ transient (is_transient: True فرد Facebook)،
-    راه هادشي كيقع أحيانا حتى لو الصورة صحيحة 100% (تأخر بسيط فسيرفراتهم).
+    كنرفعو الصورة كـ 'unpublished' (published=false) — كتبقى مرتبطة بالصفحة
+    بلا ما تبان كبوست منفصل، وكنستافدو من الـ photo id ديالها باش نلحقوها
+    بمنشور /feed من بعد. هاد الخطوة كتستعمل نفس endpoint /photos، فإلا كان
+    خطأ 2069019 مرتبط فعلا بفحص "صلاحية الإعلان"، يمكن يبان هنا كيفكيف —
+    وهذا سبب علاش زدنا مسار احتياطي كامل تاني تحت.
     """
     url = f"{GRAPH_BASE}/{FB_PAGE_ID}/photos"
     last_exception = None
     for attempt in range(1, retries + 1):
-        resp = requests.post(url, data={
-            "url": image_url,
-            "caption": caption,
-            "access_token": FB_PAGE_TOKEN,
-        })
+        with open(local_filepath, "rb") as f:
+            files = {"source": (os.path.basename(local_filepath), f, "image/png")}
+            data = {"published": "false", "access_token": FB_PAGE_TOKEN}
+            resp = requests.post(url, data=data, files=files, timeout=30)
         if resp.ok:
-            return resp.json()
-
-        _log_response_error(f"Facebook /photos (محاولة {attempt}/{retries})", resp)
+            return resp.json()["id"]
+        _log_response_error(f"Facebook unpublished /photos (محاولة {attempt}/{retries})", resp)
         try:
             is_transient = resp.json().get("error", {}).get("is_transient", False)
         except ValueError:
             is_transient = False
-
-        last_exception = requests.HTTPError(f"{resp.status_code} error on Facebook /photos", response=resp)
+        last_exception = requests.HTTPError(f"{resp.status_code} error on unpublished /photos", response=resp)
         if not is_transient or attempt == retries:
             break
-        time.sleep(delay * attempt)  # backoff تصاعدي
-
+        time.sleep(delay * attempt)
     raise last_exception
+
+
+def _post_feed_with_attached_photo(photo_id, caption):
+    """المسار 1 (الأساسي): منشور /feed عادي ملحق بيه صورة unpublished."""
+    url = f"{GRAPH_BASE}/{FB_PAGE_ID}/feed"
+    resp = requests.post(url, data={
+        "message": caption,
+        "attached_media": json.dumps([{"media_fbid": photo_id}]),
+        "access_token": FB_PAGE_TOKEN,
+    })
+    if not resp.ok:
+        _log_response_error("Facebook /feed (attached_media)", resp)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _post_feed_with_direct_photo(local_filepath, caption, retries=3, delay=5):
+    """المسار 2 (احتياطي): /photos مباشرة (published=true) بالطريقة القديمة."""
+    url = f"{GRAPH_BASE}/{FB_PAGE_ID}/photos"
+    last_exception = None
+    for attempt in range(1, retries + 1):
+        with open(local_filepath, "rb") as f:
+            files = {"source": (os.path.basename(local_filepath), f, "image/png")}
+            data = {"caption": caption, "access_token": FB_PAGE_TOKEN}
+            resp = requests.post(url, data=data, files=files, timeout=30)
+        if resp.ok:
+            return resp.json()
+        _log_response_error(f"Facebook direct /photos (محاولة {attempt}/{retries})", resp)
+        try:
+            is_transient = resp.json().get("error", {}).get("is_transient", False)
+        except ValueError:
+            is_transient = False
+        last_exception = requests.HTTPError(f"{resp.status_code} error on direct /photos", response=resp)
+        if not is_transient or attempt == retries:
+            break
+        time.sleep(delay * attempt)
+    raise last_exception
+
+
+def _post_feed_with_link(image_url, caption):
+    """المسار 3 (الضمان الأخير): منشور نصي عادي فـ /feed مع رابط الصورة كـ link
+    preview. هادشي كيضمن خروج المنشور بأي حال، حتى لو الطرق الثلاثة الأخرى
+    فشلات بسبب قيود على endpoint /photos بالذات."""
+    url = f"{GRAPH_BASE}/{FB_PAGE_ID}/feed"
+    resp = requests.post(url, data={
+        "message": caption,
+        "link": image_url,
+        "access_token": FB_PAGE_TOKEN,
+    })
+    if not resp.ok:
+        _log_response_error("Facebook /feed (link fallback)", resp)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def post_to_facebook(local_filepath, image_url, caption):
+    """
+    كنجربو 3 استراتيجيات بالترتيب، وكل وحدة عندها منطق retry ديالها:
+    1) صورة unpublished + إلحاقها بـ /feed (الطريقة الموصى بها من Meta لبوست فيه نص وصورة)
+    2) /photos مباشرة (الطريقة القديمة، احتياط إلا الأولى عندها نفس القيد)
+    3) /feed برابط الصورة (ضمان: كيخرج المنشور بأي حال ولو بدون صورة مرفوعة فعليا)
+    كنوقفو عند أول محاولة ناجحة.
+    """
+    errors = []
+
+    try:
+        photo_id = _upload_unpublished_photo(local_filepath)
+        result = _post_feed_with_attached_photo(photo_id, caption)
+        print("   → نجح عبر: unpublished photo + /feed")
+        return result
+    except Exception as e:
+        errors.append(f"[unpublished+feed] {e}")
+
+    try:
+        result = _post_feed_with_direct_photo(local_filepath, caption)
+        print("   → نجح عبر: /photos مباشرة")
+        return result
+    except Exception as e:
+        errors.append(f"[direct /photos] {e}")
+
+    try:
+        result = _post_feed_with_link(image_url, caption)
+        print("   → نجح عبر: /feed مع رابط (fallback أخير، بلا صورة مرفوعة)")
+        return result
+    except Exception as e:
+        errors.append(f"[feed link] {e}")
+
+    raise RuntimeError("فشلت الثلاث استراتيجيات ديال Facebook:\n" + "\n".join(errors))
 
 
 def wait_for_ig_container_ready(creation_id, retries=10, delay=3):
@@ -186,7 +268,7 @@ def wait_for_ig_container_ready(creation_id, retries=10, delay=3):
 
 
 def post_to_instagram(image_url, caption):
-    # الخطوة 1: إنشاء container
+    # الخطوة 1: إنشاء container (Instagram كيتطلب رابط عمومي، ماشي binary upload)
     create_url = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     resp = requests.post(create_url, data={
         "image_url": image_url,
@@ -248,7 +330,7 @@ def main():
 
     save_json(STATE_PATH, state)
 
-    # ندفعو الصورة للريبو باش يكون عندها رابط عمومي
+    # ندفعو الصورة للريبو باش يكون عندها رابط عمومي (لـ Instagram)
     git_commit_and_push([relative_path, os.path.relpath(STATE_PATH, BASE_DIR)],
                          f"Auto: dua image {filename}")
 
@@ -261,15 +343,17 @@ def main():
     print(f"🔗 رابط الصورة: {image_url}")
 
     if not missing:
+        # لازم الرابط العمومي يكون جاهز قبل أي حاولة (يستافدو منو Instagram
+        # وكذلك مسار fallback الأخير ديال Facebook)
         purge_jsdelivr_cache(relative_path)
         wait_until_url_is_live(image_url)
 
+        # Facebook: 3 استراتيجيات بالتسلسل (شوف post_to_facebook فوق)
         try:
-            fb_result = post_to_facebook(image_url, caption)
+            fb_result = post_to_facebook(filepath, image_url, caption)
             print("✅ تنشر فـ Facebook:", fb_result)
         except Exception as e:
-            print("❌ خطأ فـ Facebook:", e, file=sys.stderr)
-
+            print("❌ خطأ فـ Facebook (فشلت كل الاستراتيجيات):", e, file=sys.stderr)
         try:
             ig_result = post_to_instagram(image_url, caption)
             print("✅ تنشر فـ Instagram:", ig_result)
