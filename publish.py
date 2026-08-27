@@ -2,7 +2,7 @@
 publish.py
 - كيختار الدعاء المناسب (صباح/ظهر/مسا) بالتناوب بلا تكرار
 - كيولد الصورة
-- كيرفعها للريبو (باش يكون عندها رابط عمومي عبر raw.githubusercontent.com)
+- كيرفعها للريبو (باش يكون عندها رابط عمومي عبر jsdelivr CDN)
 - كينشرها فـ Facebook Page و Instagram Business Account
 """
 import os
@@ -29,7 +29,7 @@ GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 FB_PAGE_ID = os.environ.get("FB_PAGE_ID")
 FB_PAGE_TOKEN = os.environ.get("FB_PAGE_TOKEN")
 IG_USER_ID = os.environ.get("IG_USER_ID")
-# اسم الريبو بصيغة "username/repo" باش نبنيو رابط raw.githubusercontent.com
+# اسم الريبو بصيغة "username/repo" باش نبنيو رابط عمومي
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 
@@ -73,25 +73,50 @@ def git_commit_and_push(filepaths, message):
     subprocess.run(["git", "push"], check=True)
 
 
-def public_raw_url(relative_path):
+def public_image_url(relative_path):
+    """
+    كنستعملو jsdelivr بدل raw.githubusercontent.com:
+    - CDN حقيقية، content-type صحيح، وما فيهاش تأخر تزامن بين edges
+      اللي كان كيسبب "Missing or invalid image file" عند Facebook.
+    """
     if not GITHUB_REPOSITORY:
         raise RuntimeError("GITHUB_REPOSITORY environment variable is missing")
-    return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_BRANCH}/{relative_path}"
+    # jsdelivr كيقبل أي '/' فالمسار مباشرة
+    relative_path = relative_path.replace(os.sep, "/")
+    return f"https://cdn.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_BRANCH}/{relative_path}"
 
 
-def wait_until_url_is_live(url, retries=6, delay=5):
-    """كيتأكد أن الرابط وليا قابل للوصول (200) قبل ما نعطيوه لـ Facebook/Instagram.
-    راه GitHub raw كيتاخذ شي ثواني باش يتحدث بعد push."""
+def purge_jsdelivr_cache(relative_path):
+    """
+    jsdelivr كيدير cache للملفات. كنطلبو purge باش يجيب آخر نسخة
+    بدل ما يبقى يخدم نسخة قديمة (أو 404 من قبل ما يتپوش الملف).
+    """
+    relative_path = relative_path.replace(os.sep, "/")
+    purge_url = f"https://purge.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_BRANCH}/{relative_path}"
+    try:
+        requests.get(purge_url, timeout=15)
+    except requests.RequestException as e:
+        print(f"⚠️  ماقدرناش نديرو purge لـ jsdelivr cache: {e}")
+
+
+def wait_until_url_is_live(url, retries=8, delay=5):
+    """
+    كنتأكدو بلي الرابط رد فعلا بصورة صحيحة (status 200 + content-type image/*)
+    قبل ما نعطيوه لـ Facebook/Instagram. كنستعملو GET (ماشي HEAD) باش
+    نتأكدو من المحتوى الحقيقي اللي غادي يشوفه Facebook.
+    """
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.head(url, timeout=10)
-            if resp.status_code == 200:
+            resp = requests.get(url, timeout=15)
+            content_type = resp.headers.get("Content-Type", "")
+            if resp.status_code == 200 and content_type.startswith("image/") and len(resp.content) > 0:
+                print(f"✅ الرابط جاهز (محاولة {attempt}): {content_type}, {len(resp.content)} bytes")
                 return True
-            print(f"⏳ محاولة {attempt}/{retries}: الرابط مازال ماشي جاهز (status={resp.status_code})")
+            print(f"⏳ محاولة {attempt}/{retries}: status={resp.status_code} content-type={content_type}")
         except requests.RequestException as e:
             print(f"⏳ محاولة {attempt}/{retries}: خطأ فالوصول للرابط: {e}")
         time.sleep(delay)
-    print("⚠️  الرابط مازال ماشي متجاوب بعد كل المحاولات، غادي نكملو بالرغم من ذلك.")
+    print("⚠️  الرابط مازال ماشي متجاوب صحيح بعد كل المحاولات، غادي نكملو بالرغم من ذلك.")
     return False
 
 
@@ -104,17 +129,60 @@ def _log_response_error(prefix, resp):
     print(f"❌ {prefix} — status={resp.status_code} body={payload}", file=sys.stderr)
 
 
-def post_to_facebook(image_url, caption):
+def post_to_facebook(image_url, caption, retries=3, delay=5):
+    """
+    كنعاودو المحاولة إلا كان الخطأ transient (is_transient: True فرد Facebook)،
+    راه هادشي كيقع أحيانا حتى لو الصورة صحيحة 100% (تأخر بسيط فسيرفراتهم).
+    """
     url = f"{GRAPH_BASE}/{FB_PAGE_ID}/photos"
-    resp = requests.post(url, data={
-        "url": image_url,
-        "caption": caption,
-        "access_token": FB_PAGE_TOKEN,
-    })
-    if not resp.ok:
-        _log_response_error("Facebook /photos", resp)
-    resp.raise_for_status()
-    return resp.json()
+    last_exception = None
+    for attempt in range(1, retries + 1):
+        resp = requests.post(url, data={
+            "url": image_url,
+            "caption": caption,
+            "access_token": FB_PAGE_TOKEN,
+        })
+        if resp.ok:
+            return resp.json()
+
+        _log_response_error(f"Facebook /photos (محاولة {attempt}/{retries})", resp)
+        try:
+            is_transient = resp.json().get("error", {}).get("is_transient", False)
+        except ValueError:
+            is_transient = False
+
+        last_exception = requests.HTTPError(f"{resp.status_code} error on Facebook /photos", response=resp)
+        if not is_transient or attempt == retries:
+            break
+        time.sleep(delay * attempt)  # backoff تصاعدي
+
+    raise last_exception
+
+
+def wait_for_ig_container_ready(creation_id, retries=10, delay=3):
+    """
+    Instagram كيطلب وقت باش يعالج الصورة قبل ما يقبل media_publish.
+    خاصنا نـ poll على status_code حتى يولي FINISHED.
+    """
+    status_url = f"{GRAPH_BASE}/{creation_id}"
+    for attempt in range(1, retries + 1):
+        resp = requests.get(status_url, params={
+            "fields": "status_code",
+            "access_token": FB_PAGE_TOKEN,
+        })
+        if resp.ok:
+            status = resp.json().get("status_code")
+            print(f"⏳ Instagram container status (محاولة {attempt}/{retries}): {status}")
+            if status == "FINISHED":
+                return True
+            if status == "ERROR":
+                print("❌ Instagram container status = ERROR", file=sys.stderr)
+                return False
+        else:
+            _log_response_error("Instagram status check", resp)
+        time.sleep(delay)
+    print("⚠️  الـ container مازال IN_PROGRESS بعد كل المحاولات.")
+    return False
 
 
 def post_to_instagram(image_url, caption):
@@ -130,7 +198,10 @@ def post_to_instagram(image_url, caption):
     resp.raise_for_status()
     creation_id = resp.json()["id"]
 
-    # الخطوة 2: نشر container
+    # الخطوة 2: كنستناو حتى الـ container يولي FINISHED قبل النشر
+    wait_for_ig_container_ready(creation_id)
+
+    # الخطوة 3: نشر container
     publish_url = f"{GRAPH_BASE}/{IG_USER_ID}/media_publish"
     resp2 = requests.post(publish_url, data={
         "creation_id": creation_id,
@@ -183,14 +254,14 @@ def main():
 
     # ملاحظة: هاد الدالة كتفترض أن جذر الريبو هو نفسه مجلد المشروع (BASE_DIR).
     # إلا كان المشروع فمجلد فرعي فالريبو، زيد اسم المجلد هنا، مثلا: f"daily-duas/{relative_path}"
-    image_url = public_raw_url(relative_path)
+    image_url = public_image_url(relative_path)
     caption = dua["text"] + (f"\n\n({dua['source']})" if dua.get("source") else "") + \
         "\n\n#دعاء #اذكار #إسلام #قرآن"
 
     print(f"🔗 رابط الصورة: {image_url}")
 
     if not missing:
-        # نتأكدو بلي الرابط وليا قابل للقراءة عبر raw.githubusercontent.com قبل نعطيوه لفيسبوك/انستغرام
+        purge_jsdelivr_cache(relative_path)
         wait_until_url_is_live(image_url)
 
         try:
