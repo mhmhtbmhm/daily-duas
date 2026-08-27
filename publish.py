@@ -9,6 +9,7 @@ import os
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -78,6 +79,31 @@ def public_raw_url(relative_path):
     return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_BRANCH}/{relative_path}"
 
 
+def wait_until_url_is_live(url, retries=6, delay=5):
+    """كيتأكد أن الرابط وليا قابل للوصول (200) قبل ما نعطيوه لـ Facebook/Instagram.
+    راه GitHub raw كيتاخذ شي ثواني باش يتحدث بعد push."""
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.head(url, timeout=10)
+            if resp.status_code == 200:
+                return True
+            print(f"⏳ محاولة {attempt}/{retries}: الرابط مازال ماشي جاهز (status={resp.status_code})")
+        except requests.RequestException as e:
+            print(f"⏳ محاولة {attempt}/{retries}: خطأ فالوصول للرابط: {e}")
+        time.sleep(delay)
+    print("⚠️  الرابط مازال ماشي متجاوب بعد كل المحاولات، غادي نكملو بالرغم من ذلك.")
+    return False
+
+
+def _log_response_error(prefix, resp):
+    """كيطبع تفاصيل الخطأ الكاملة اللي كترجعها Facebook Graph API (error.message, code, subcode)."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = resp.text
+    print(f"❌ {prefix} — status={resp.status_code} body={payload}", file=sys.stderr)
+
+
 def post_to_facebook(image_url, caption):
     url = f"{GRAPH_BASE}/{FB_PAGE_ID}/photos"
     resp = requests.post(url, data={
@@ -85,6 +111,8 @@ def post_to_facebook(image_url, caption):
         "caption": caption,
         "access_token": FB_PAGE_TOKEN,
     })
+    if not resp.ok:
+        _log_response_error("Facebook /photos", resp)
     resp.raise_for_status()
     return resp.json()
 
@@ -97,6 +125,8 @@ def post_to_instagram(image_url, caption):
         "caption": caption,
         "access_token": FB_PAGE_TOKEN,
     })
+    if not resp.ok:
+        _log_response_error("Instagram /media (create container)", resp)
     resp.raise_for_status()
     creation_id = resp.json()["id"]
 
@@ -106,6 +136,8 @@ def post_to_instagram(image_url, caption):
         "creation_id": creation_id,
         "access_token": FB_PAGE_TOKEN,
     })
+    if not resp2.ok:
+        _log_response_error("Instagram /media_publish", resp2)
     resp2.raise_for_status()
     return resp2.json()
 
@@ -158,6 +190,9 @@ def main():
     print(f"🔗 رابط الصورة: {image_url}")
 
     if not missing:
+        # نتأكدو بلي الرابط وليا قابل للقراءة عبر raw.githubusercontent.com قبل نعطيوه لفيسبوك/انستغرام
+        wait_until_url_is_live(image_url)
+
         try:
             fb_result = post_to_facebook(image_url, caption)
             print("✅ تنشر فـ Facebook:", fb_result)
