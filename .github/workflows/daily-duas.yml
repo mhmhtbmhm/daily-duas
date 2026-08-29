@@ -1,11 +1,6 @@
 name: Daily Duas Auto-Publish
 on:
-  schedule:
-    # الأوقات بتوقيت UTC. المغرب عادة UTC+1 (وUTC+0 خلال رمضان).
-    - cron: "7 6 * * *"    # ~ 7:07 صباحا بتوقيت المغرب  -> دعاء الصباح
-    - cron: "12 12 * * *"  # ~ 1:12 الظهر بتوقيت المغرب  -> دعاء الظهر
-    - cron: "18 17 * * *"  # ~ 6:18 مساء بتوقيت المغرب   -> دعاء المساء
-  workflow_dispatch:        # يسمح بتشغيل يدوي من تبويب Actions للتجربة
+  workflow_dispatch:        # يسمح بتشغيل يدوي من تبويب Actions أو عبر cron-job.org
     inputs:
       slot:
         description: "الفترة (morning / afternoon / evening)"
