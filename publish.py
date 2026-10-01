@@ -1,11 +1,14 @@
 """
 publish.py
 - يختار الدعاء المناسب (صباح/ظهر/مساء) بالتناوب بلا تكرار
+- يختار مقطعا صوتيا بالتناوب من مجموعة ملفات صوتية متعددة (assets/audio/)
+  لتفادي نشر نفس الصوت دائما (تنويع يقلل خطر تصنيف المحتوى كمتكرر/spam)
 - يولّد الفيديو (Reel قصير)
 - يرفعه كـ GitHub Release asset (رابط عمومي دائم، بلا أي تأثير على تاريخ Git
   أو حجم الريبو — الفيديو لا يدخل تاريخ الـ commits إطلاقا)
 - ينشره كـ Reel على Facebook Page و Instagram Business Account، وكذلك على YouTube Shorts
 """
+import glob
 import os
 import json
 import subprocess
@@ -21,6 +24,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DUAS_PATH = os.path.join(BASE_DIR, "duas.json")
 STATE_PATH = os.path.join(BASE_DIR, "state.json")
 POSTS_DIR = os.path.join(BASE_DIR, "posts")
+
+# مجلد الملفات الصوتية المتعددة. أي عدد من الملفات يعمل (ليس شرطا 100) —
+# يُقرأ المجلد تلقائيا في كل تشغيل، فإضافة/حذف ملف لا يحتاج أي تعديل كود.
+# صيغ مقبولة: mp3, m4a, wav, ogg.
+AUDIO_DIR = os.path.join(BASE_DIR, "assets", "audio")
+AUDIO_EXTENSIONS = ("*.mp3", "*.m4a", "*.wav", "*.ogg")
 
 # اسم الـ tag الثابت للـ Release المستعمل كمخزن مؤقت للفيديوهات.
 # نستعمل Release واحد دائم (بدل واحد جديد كل مرة) ونحذف منه الـ assets
@@ -82,6 +91,34 @@ def pick_next_dua(duas, state, category):
     dua = candidates[idx]
     state[key] = (idx + 1) % len(candidates)
     return dua
+
+
+def pick_next_audio(state):
+    """
+    يختار الملف الصوتي التالي بالتناوب (round-robin) من مجلد assets/audio/،
+    بنفس منطق pick_next_dua بالضبط. يدعم أي عدد من الملفات (10، 50، 100،
+    200...) بلا أي تعديل كود — فقط أضف/احذف ملفات من المجلد.
+
+    الترتيب يعتمد على الترتيب الأبجدي لأسماء الملفات، لذا يُفضَّل تسميتها
+    بأرقام مرتبة (audio_001.mp3, audio_002.mp3, ...) لضمان تناوب متوقع
+    وثابت عبر التشغيلات.
+    """
+    audio_files = []
+    for pattern in AUDIO_EXTENSIONS:
+        audio_files.extend(glob.glob(os.path.join(AUDIO_DIR, pattern)))
+    audio_files = sorted(audio_files)
+
+    if not audio_files:
+        raise FileNotFoundError(
+            f"لا توجد أي ملفات صوتية في {AUDIO_DIR}. "
+            "أضف ملفا واحدا على الأقل (mp3/m4a/wav/ogg)."
+        )
+
+    key = "index_audio"
+    idx = state.get(key, 0) % len(audio_files)
+    chosen = audio_files[idx]
+    state[key] = (idx + 1) % len(audio_files)
+    return chosen
 
 
 def git_commit_and_push(filepaths, message):
@@ -391,6 +428,8 @@ def main():
     state = load_json(STATE_PATH, {})
 
     dua = pick_next_dua(duas, state, SLOT)
+    audio_path = pick_next_audio(state)
+    print(f"🎵 الصوت المختار لهذا المنشور: {os.path.basename(audio_path)}")
 
     os.makedirs(POSTS_DIR, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -398,7 +437,7 @@ def main():
     video_filepath = os.path.join(POSTS_DIR, video_filename)
 
     generate_dua_video(dua["text"], category=SLOT, source=dua.get("source", ""),
-                        output_path=video_filepath)
+                        output_path=video_filepath, audio_path=audio_path)
     print(f"✅ الفيديو تولّد: {video_filepath}")
 
     save_json(STATE_PATH, state)
