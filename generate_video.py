@@ -1,9 +1,13 @@
 """
 generate_video.py
 يبدل صورة الدعاء العمودية (1080x1920) لفيديو قصير (YouTube Shorts / Reels):
-حركة تكبير بطيئة وناعمة (Ken Burns effect)، مع مقطع صوتي ثابت (تلاوة آيات
+حركة تكبير بطيئة وناعمة (Ken Burns effect)، مع مقطع صوتي (تلاوة آيات
 قرآنية) يُستعمل كصوت للفيديو بالكامل. مدة الفيديو تُطابق مدة التلاوة
-تلقائيا (ضمن حد أدنى وأقصى معقولين)، فلا حاجة لرقم ثابت عشوائي.
+تلقائيا (ضمن حد أدنى وأقصى معقولين).
+
+تحديث: الصوت لم يعد ملفا ثابتا واحدا — يُمرَّر الآن كمُعامل (audio_path)
+من publish.py، الذي يختاره بالتناوب من مجموعة ملفات صوتية متعددة
+(موجودة في assets/audio/) لتفادي تكرار نفس الصوت في كل منشور.
 """
 import os
 import subprocess
@@ -15,13 +19,11 @@ VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 FPS = 30
 
-# المقطع الصوتي الثابت (تلاوة آيتين/ثلاث) — بدّل المسار حسب مكان الملف
-# الحقيقي عندك (مثلا داخل مجلد assets/).
-QURAN_AUDIO_PATH = os.path.join(BASE_DIR, "assets", "quran_background.mp3")
+# مسار افتراضي يُستعمل فقط إذا استُدعيت الدالة بلا تمرير audio_path صراحة
+# (مثلا عند تشغيل الملف مباشرة بـ __main__ للاختبار). الاستعمال الفعلي من
+# publish.py يمرر دائما audio_path الصحيح المختار بالتناوب.
+DEFAULT_AUDIO_PATH = os.path.join(BASE_DIR, "assets", "audio", "audio_001.mp3")
 
-# حدود مدة الفيديو: لا يقل عن 15 ثانية (حتى لا يبدو مقتضبا)، ولا يتجاوز
-# 59 ثانية (حد YouTube Shorts؛ Instagram/Facebook Reels تسمح بأكثر لكن
-# نلتزم بالأصغر لضمان التوافق مع الثلاث منصات دفعة واحدة).
 MIN_DURATION_SECONDS = 15
 MAX_DURATION_SECONDS = 59
 
@@ -38,14 +40,22 @@ def _get_audio_duration(audio_path):
     return float(result.stdout.strip())
 
 
-def generate_dua_video(text, category="general", source="", output_path="output.mp4"):
-    if not os.path.isfile(QURAN_AUDIO_PATH):
+def generate_dua_video(text, category="general", source="", output_path="output.mp4",
+                        audio_path=None):
+    """
+    audio_path: مسار الملف الصوتي المستعمل لهذا الفيديو تحديدا. إذا تُرك
+    None، يُستعمل DEFAULT_AUDIO_PATH (مفيد فقط للاختبار اليدوي المباشر).
+    """
+    if audio_path is None:
+        audio_path = DEFAULT_AUDIO_PATH
+
+    if not os.path.isfile(audio_path):
         raise FileNotFoundError(
-            f"المقطع الصوتي الثابت غير موجود: {QURAN_AUDIO_PATH}\n"
-            "تأكد من وضع ملف التلاوة في هذا المسار (أو بدّل QURAN_AUDIO_PATH أعلاه)."
+            f"المقطع الصوتي غير موجود: {audio_path}\n"
+            "تأكد من وجود الملف في المسار الصحيح داخل assets/audio/."
         )
 
-    audio_duration = _get_audio_duration(QURAN_AUDIO_PATH)
+    audio_duration = _get_audio_duration(audio_path)
     # مدة الفيديو = مدة التلاوة، مُقيَّدة بين الحد الأدنى والأقصى
     duration = max(MIN_DURATION_SECONDS, min(audio_duration, MAX_DURATION_SECONDS))
 
@@ -79,7 +89,7 @@ def generate_dua_video(text, category="general", source="", output_path="output.
         # بـ MIN/MAX) أطول من التلاوة نفسها؛ و-t تحته يقص الزائد إن كانت
         # التلاوة أطول من MAX_DURATION_SECONDS. نفس السطر يغطي الحالتين.
         "-stream_loop", "-1",
-        "-i", QURAN_AUDIO_PATH,
+        "-i", audio_path,
         "-vf", zoompan_filter,
         "-t", str(duration),
         "-c:v", "libx264",
