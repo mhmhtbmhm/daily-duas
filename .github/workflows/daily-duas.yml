@@ -1,52 +1,94 @@
 name: Daily Duas Auto-Publish
+
 on:
-  workflow_dispatch:        # يسمح بتشغيل يدوي من تبويب Actions أو عبر cron-job.org
+  # المشغّل: cron-job.org  (POST .../actions/workflows/daily-duas.yml/dispatches)
+  #   body: {"ref":"main","inputs":{"slot":"morning"}}   ثم afternoon ثم evening
+  workflow_dispatch:
     inputs:
       slot:
-        description: "الفترة (morning / afternoon / evening)"
+        description: "الفترة (morning / afternoon / evening) — إن تُركت فارغة تُستنتج من الساعة"
         required: false
-        default: "general"
+        default: ""
+      force:
+        description: "انشر حتى لو نُشرت هذه الفترة اليوم (true/false)"
+        required: false
+        default: "false"
+
 permissions:
   contents: write
+
+# تشغيل واحد في كل مرة (لا تعارض على state.json) — والتشغيل الثاني ينتظر ولا يُلغى
+concurrency:
+  group: daily-duas-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-      - name: Determine time slot
-        id: slot
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "slot=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
-          else
-            HOUR=$(date -u +%H)
-            if [ "$HOUR" -eq 6 ]; then
-              echo "slot=morning" >> "$GITHUB_OUTPUT"
-            elif [ "$HOUR" -eq 12 ]; then
-              echo "slot=afternoon" >> "$GITHUB_OUTPUT"
-            else
-              echo "slot=evening" >> "$GITHUB_OUTPUT"
-            fi
-          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+          cache: pip
+
+      - name: System packages (ffmpeg + Arabic text shaping)
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -y && sudo apt-get install -y --no-install-recommends ffmpeg libraqm0 libfribidi0 libharfbuzz0b && break
+            echo "apt attempt $i failed"; sleep 15
+          done
+          ffmpeg -version | head -1
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Generate and publish dua
+
+      - name: Generate and publish
         env:
+          SLOT_INPUT: ${{ github.event.inputs.slot }}
+          FORCE: ${{ github.event.inputs.force }}
+          DUA_SLOT: ${{ github.event.inputs.slot }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_BRANCH: ${{ github.ref_name }}
-          DUA_SLOT: ${{ steps.slot.outputs.slot }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-        run: python publish.py
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # اختياري (Settings ▸ Variables): نوع كل فترة dua|word|seq، والقراء
+          MORNING_MODE: ${{ vars.MORNING_MODE }}
+          AFTERNOON_MODE: ${{ vars.AFTERNOON_MODE }}
+          EVENING_MODE: ${{ vars.EVENING_MODE }}
+          WORD_RECITER: ${{ vars.WORD_RECITER || 'alafasy' }}
+          SEQ_RECITER: ${{ vars.SEQ_RECITER || 'sudais' }}
+          PRIVACY: ${{ vars.PRIVACY || 'public' }}
+        run: |
+          # ثلاث محاولات كاملة؛ publish.py آمن للإعادة (لا يتحرك مؤشر قبل النجاح، ويتخطى فترة نُشرت اليوم)
+          for i in 1 2 3; do
+            python publish.py && exit 0
+            echo "::warning::المحاولة $i فشلت"
+            sleep $((i * 120))
+          done
+          exit 1
+
+      - name: Save state (safety net)
+        if: always()
+        run: |
+          git config user.name "daily-duas-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto: state sync"
+            for i in 1 2 3 4 5; do
+              git push && break
+              git pull --rebase --autostash || true
+              sleep $((i * 4))
+            done
+          fi
