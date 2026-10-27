@@ -2,10 +2,10 @@
   "index_general": 1,
   "index_evening": 6,
   "index_morning": 1,
-  "index_afternoon": 4,
+  "index_afternoon": 5,
   "index_afternoon ": 5,
   "index_morning ": 6,
-  "index_audio": 77,
+  "index_audio": 78,
   "qseq": {
     "surah": 1,
     "ayah": 2,
@@ -15,6 +15,7 @@
     "skipped_list": []
   },
   "last_run": {
-    "evening": "2026-10-27"
+    "evening": "2026-10-27",
+    "afternoon": "2026-10-27"
   }
 }
