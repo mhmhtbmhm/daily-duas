@@ -1,7 +1,9 @@
 """
-seq.py — «التلاوة المتتابعة»: آية واحدة في كل فيديو، من أول المصحف إلى آخره ثم تبدأ ختمة جديدة.
-  • الصوت: تلاوة الشيخ عبد الرحمن السديس (everyayah.com) — آية بآية، فالنص والصوت متطابقان دائمًا.
-  • آية تتجاوز الحد الأقصى للمدة تُتخطّى نهائيًا وننتقل إلى التالية (تُسجَّل في state["qseq"]["skipped_list"]).
+seq.py — «التلاوة المتتابعة»: أكبر عدد ممكن من الآيات المتتالية في كل فيديو بشرط ألا يتجاوز 59 ثانية أبدًا،
+من أول المصحف إلى آخره ثم تبدأ ختمة جديدة.
+  • الصوت: تلاوة الشيخ عبد الرحمن السديس (everyayah.com) — آية بآية تُلصق معًا بفاصل قصير، فالنص والصوت متطابقان دائمًا.
+  • نضيف الآية التالية فقط إذا بقي الصوت ≤ AUDIO_BUDGET وكان النص مقروءًا على البطاقة؛ لا نتجاوز نهاية السورة.
+  • الآية الأولى وحدها إن تجاوزت الحد تُتخطّى نهائيًا (تُسجَّل في state["qseq"]["skipped_list"]).
   • فشل التنزيل (شبكة) لا يُعدّ تخطيًا: يُرفع خطأ فيحلّ المنشور الاحتياطي ولا يتحرك المؤشر.
   • المؤشر يُحفظ في state["qseq"] ولا يتقدّم إلا بعد نجاح النشر (المنسّق يحفظ الحالة بعده).
 """
@@ -26,6 +28,10 @@ assert len(COUNTS) == 114 and sum(COUNTS) == 6236, "جدول عدد الآيات
 
 HARD_LIMIT = config.HARD_LIMIT          # 58.5 ثانية — لا يُتجاوز أبدًا
 LEAD, TAIL, MIN_TOTAL = 0.45, 1.4, 9.0
+GAP = 0.35                             # صمت قصير بين آيتين
+AUDIO_BUDGET = 56.0                    # أقصى مجموع صوت+فواصل → الفيديو ≤ 58.5ث
+MAX_AYAHS = 15
+MIN_FONT = 46                          # أصغر خط مقبول لقراءة النص على الهاتف
 MAX_SKIPS = 12
 RECITER = os.environ.get("SEQ_RECITER", "sudais").strip().lower()
 
@@ -44,23 +50,41 @@ def position(s, a):
     return sum(COUNTS[:s - 1]) + a
 
 
-def _draw_verse(img, text, top, bottom):
-    d = ImageDraw.Draw(img)
-    toks, merged = text.split(), []
-    for t in toks:                                         # دمج علامات الوقف المنفردة مع ما قبلها
+def _merge(text):
+    merged = []
+    for t in text.split():                                 # دمج علامات الوقف ورقم الآية مع الكلمة السابقة
         if merged and not qa.has_letters(t):
             merged[-1] += " " + t
         else:
             merged.append(t)
+    return merged
+
+
+def _layout(d, text, top, bottom, min_size):
     area_w, area_h = C.W - 190, bottom - top
-    for size in range(120, 33, -2):
+    merged = _merge(text)
+    for size in range(120, min_size - 1, -2):
         f = C.quran_font(size)
         lines, space = C.wrap(d, merged, f, area_w)
         lh = f.size * 1.85
         if len(lines) * lh <= area_h:
-            break
-    block = len(lines) * lh
-    y = top + (area_h - block) / 2
+            return f, lines, space, lh, True
+    return f, lines, space, lh, False
+
+
+TOP, BOTTOM = 490, 1515
+
+
+def fits(text):
+    """هل يتسع النص على البطاقة بخط ≥ MIN_FONT؟"""
+    d = ImageDraw.Draw(Image.new("RGB", (C.W, C.H)))
+    return _layout(d, text, TOP, BOTTOM, MIN_FONT)[4]
+
+
+def _draw_verse(img, text, top, bottom):
+    d = ImageDraw.Draw(img)
+    f, lines, space, lh, _ = _layout(d, text, top, bottom, 34)
+    y = top + ((bottom - top) - len(lines) * lh) / 2
     for line, lw in lines:
         x = C.W / 2 + lw / 2
         for t in line:
@@ -77,9 +101,12 @@ def scene(ctx):
     name = "سورة " + ctx["surah_name"]
     C.put_center(d, 255, name, C.fit_font(d, name, C.bold, 820, 100, 56), C.GOLD)
     C._card(img, [70, 430, C.W - 70, 1590], alpha=20)
-    _draw_verse(img, ctx["verse"], 490, 1515)
+    _draw_verse(img, ctx["verse"], TOP, BOTTOM)
     d = ImageDraw.Draw(img)
-    ref = f"الآية {qa.ar_num(ctx['ayah'])} من {qa.ar_num(ctx['n_ayahs'])}"
+    if ctx["a2"] > ctx["a1"]:
+        ref = f"الآيات {qa.ar_num(ctx['a1'])}–{qa.ar_num(ctx['a2'])} من {qa.ar_num(ctx['n_ayahs'])}"
+    else:
+        ref = f"الآية {qa.ar_num(ctx['a1'])} من {qa.ar_num(ctx['n_ayahs'])}"
     C.put_center(d, 1630, ref, C.bold(54), C.CREAM)
     C.put_center(d, 1710, f"التلاوة: {ctx['reciter']}", C.regular(42), C.GOLD)
     # شريط التقدم في المصحف
@@ -92,20 +119,32 @@ def scene(ctx):
     return img
 
 
-def _build_video(image, clip_path, out_path):
-    dur = duration(clip_path)
+def _build_video(image, clip_paths, out_path):
+    """يلصق التلاوات (فاصل GAP بينها) ثم يبني الفيديو. يرجع المدة الكلية."""
+    durs = [duration(c) for c in clip_paths]
+    dur = sum(durs) + GAP * (len(durs) - 1)
     total = min(max(dur + LEAD + TAIL, MIN_TOTAL), HARD_LIMIT)
+    if dur + LEAD + TAIL > HARD_LIMIT:
+        raise RuntimeError(f"الصوت {dur:.1f}ث أطول من الميزانية")
     ms = int(LEAD * 1000)
     fo = max(0.5, min(1.2, dur - 0.5))
+    n = len(clip_paths)
+    parts = []
+    for i in range(n):
+        pad = f",apad=pad_dur={GAP}" if i < n - 1 else ""
+        parts.append(f"[{i + 1}:a]aresample=44100,aformat=channel_layouts=stereo{pad}[c{i}]")
+    cat = "".join(f"[c{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[cat]"
     zoom = (f"scale=1620:2880,zoompan=z='1+0.035*on/{int(total * config.FPS)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
             f"s={config.W}x{config.H}:fps={config.FPS},format=yuv420p,fade=t=in:st=0:d=0.5,fade=t=out:st={total - 0.7:.3f}:d=0.7[v]")
-    g = [f"[0:v]{zoom}",
-         f"[1:a]aresample=44100,aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=9,"
-         f"afade=t=in:d=0.35,afade=t=out:st={max(0.0, dur - fo):.3f}:d={fo:.3f},adelay={ms}|{ms},apad=whole_dur={total:.3f}[a]"]
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(config.FPS), "-loop", "1", "-t", f"{total:.3f}", "-i", image,
-           "-i", clip_path, "-filter_complex", ";".join(g), "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-           "-movflags", "+faststart", out_path]
+    g = [f"[0:v]{zoom}"] + parts + [cat,
+         f"[cat]loudnorm=I=-16:TP=-1.5:LRA=9,afade=t=in:d=0.35,afade=t=out:st={max(0.0, dur - fo):.3f}:d={fo:.3f},"
+         f"adelay={ms}|{ms},apad=whole_dur={total:.3f}[a]"]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(config.FPS), "-loop", "1", "-t", f"{total:.3f}", "-i", image]
+    for c in clip_paths:
+        cmd += ["-i", c]
+    cmd += ["-filter_complex", ";".join(g), "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", out_path]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
@@ -113,8 +152,12 @@ def _build_video(image, clip_path, out_path):
     return total
 
 
+def _marker(a):
+    return f"﴿{qa.ar_num(a)}﴾"
+
+
 def build(st, out_dir):
-    """يبني منشور الآية التالية في التتابع ويحرّك المؤشر داخل st (الذي يحفظه المنسّق بعد النجاح فقط)."""
+    """يبني منشور المجموعة التالية من الآيات ويحرّك المؤشر داخل st (الذي يحفظه المنسّق بعد النجاح فقط)."""
     C.require_raqm()
     q = st.setdefault("qseq", {})
     q.setdefault("surah", 1), q.setdefault("ayah", 1), q.setdefault("cycle", 1)
@@ -123,38 +166,63 @@ def build(st, out_dir):
     if not (1 <= s <= 114 and 1 <= a <= COUNTS[s - 1]):          # حالة تالفة → نبدأ من أول المصحف
         s, a = 1, 1
     cycle, skipped = q["cycle"], []
-    clip = None
+
+    # 1) الآية الأولى: تُتخطّى نهائيًا إن كانت وحدها أطول من الميزانية
     for _ in range(MAX_SKIPS + 1):
-        path, dur, rname = ap.download_ayah(s, a, RECITER)         # AudioError ← يتحول لمنشور احتياطي
-        if dur <= config.MAX_CLIP:
-            clip = (path, dur, rname)
+        path, dur, rname = ap.download_ayah(s, a, RECITER)         # AudioError ← منشور احتياطي دون تحريك المؤشر
+        if dur <= AUDIO_BUDGET:
             break
-        print(f"   ⏭ {s}:{a} مدتها {dur:.1f}ث > {config.MAX_CLIP:.0f}ث — نتخطاها")
+        print(f"   ⏭ {s}:{a} مدتها {dur:.1f}ث > {AUDIO_BUDGET:.0f}ث — نتخطاها")
         skipped.append(f"{s}:{a}")
         s, a, wrapped = advance(s, a)
         cycle += wrapped
-    if not clip:
+    else:
         raise RuntimeError(f"تجاوزنا {MAX_SKIPS} آيات طويلة متتالية — غير متوقع")
-    path, dur, rname = clip
     surah_name, _ = qa.chapter(s)
+    first = a
     verse = qa.verse_text(s, a)
-    ctx = {"surah": s, "ayah": a, "surah_name": surah_name, "verse": verse, "n_ayahs": COUNTS[s - 1],
-           "reciter": rname, "pos": position(s, a), "cycle": cycle}
+    text = f"{verse} {_marker(a)}"
+    if not fits(text):
+        raise RuntimeError(f"نص {s}:{a} أطول من أن يتسع على البطاقة")
+    clips, total_audio, last = [path], dur, a
+
+    # 2) نضيف الآيات التالية ما دامت تتسع صوتًا ونصًا، ولا نتجاوز نهاية السورة
+    while last < COUNTS[s - 1] and len(clips) < MAX_AYAHS:
+        na = last + 1
+        try:
+            p2, d2, _ = ap.download_ayah(s, na, RECITER, retries=2)
+            t2 = qa.verse_text(s, na)
+        except (ap.AudioError, qa.QuranError) as e:
+            print(f"   ⚠ توقّف التجميع عند {s}:{na}: {str(e)[:60]}")
+            break
+        if total_audio + GAP + d2 > AUDIO_BUDGET:
+            break
+        cand = f"{text} {t2} {_marker(na)}"
+        if not fits(cand):
+            break
+        clips.append(p2)
+        total_audio += GAP + d2
+        text, last = cand, na
+
+    n_ayahs = COUNTS[s - 1]
+    ctx = {"surah": s, "a1": first, "a2": last, "surah_name": surah_name, "verse": text, "n_ayahs": n_ayahs,
+           "reciter": rname, "pos": position(s, last), "cycle": cycle}
     os.makedirs(out_dir, exist_ok=True)
-    img_path = os.path.join(out_dir, f"qseq_{s}_{a}.png")
+    img_path = os.path.join(out_dir, f"qseq_{s}_{first}.png")
     scene(ctx).convert("RGB").save(img_path)
-    out = os.path.join(out_dir, f"qseq_{s:03d}_{a:03d}.mp4")
-    total = _build_video(img_path, path, out)
+    out = os.path.join(out_dir, f"qseq_{s:03d}_{first:03d}-{last:03d}.mp4")
+    total = _build_video(img_path, clips, out)
     os.remove(img_path)
-    ns, na, wrapped = advance(s, a)
+    ns, na, wrapped = advance(s, last)
     q.update({"surah": ns, "ayah": na, "cycle": cycle + wrapped, "done": q["done"] + 1,
               "skipped": q["skipped"] + len(skipped), "skipped_list": (q["skipped_list"] + skipped)[-200:]})
-    ref = f"سورة {surah_name} — الآية {qa.ar_num(a)}"
-    title = f"{surah_name} — الآية {qa.ar_num(a)} | تلاوة {rname.replace('الشيخ ', '')} #shorts"
+    rng = qa.ar_num(first) if last == first else f"{qa.ar_num(first)}–{qa.ar_num(last)}"
+    word = "الآية" if last == first else "الآيات"
+    title = f"{surah_name} — {word} {rng} | تلاوة {rname.replace('الشيخ ', '')} #shorts"
     if len(title) > 100:
-        title = f"{surah_name} {qa.ar_num(a)} #shorts"
-    caption = f"﴿ {verse} ﴾\n({ref})\n\n🎙️ {rname}\n\n#القرآن_الكريم #تلاوة #قرآن #shorts"
-    desc = (caption + f"\n\n📖 تلاوة متتابعة من أول المصحف آيةً بآية (الآية {qa.ar_num(position(s, a))} من ٦٢٣٦).\n"
-            "📚 نص الآية: Quran.com — 🔊 الصوت: everyayah.com")
-    print(f"   ✓ {s}:{a} — {total:.1f}ث — التالي {ns}:{na}" + (f" — متخطّاة {skipped}" if skipped else ""))
-    return Post(out, title, desc, caption, ["القرآن الكريم", "تلاوة", surah_name, "shorts"], label=f"seq {s}:{a}")
+        title = f"{surah_name} {rng} #shorts"
+    caption = f"﴿ {text} ﴾\n(سورة {surah_name} — {word} {rng})\n\n🎙️ {rname}\n\n#القرآن_الكريم #تلاوة #قرآن #shorts"
+    desc = (caption + f"\n\n📖 تلاوة متتابعة من أول المصحف (الآية {qa.ar_num(position(s, last))} من ٦٢٣٦).\n"
+            "📚 نص الآيات: Quran.com — 🔊 الصوت: everyayah.com")
+    print(f"   ✓ {s}:{first}-{last} ({len(clips)} آيات) — {total:.1f}ث — التالي {ns}:{na}" + (f" — متخطّاة {skipped}" if skipped else ""))
+    return Post(out, title, desc, caption, ["القرآن الكريم", "تلاوة", surah_name, "shorts"], label=f"seq {s}:{first}-{last}")
