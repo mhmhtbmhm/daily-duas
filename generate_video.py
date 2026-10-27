@@ -25,7 +25,7 @@ FPS = 30
 DEFAULT_AUDIO_PATH = os.path.join(BASE_DIR, "assets", "audio", "audio_001.mp3")
 
 MIN_DURATION_SECONDS = 15
-MAX_DURATION_SECONDS = 59
+MAX_DURATION_SECONDS = 58.5      # سقف صارم: لا فيديو يبلغ 59 ثانية أبدًا
 
 
 def _get_audio_duration(audio_path):

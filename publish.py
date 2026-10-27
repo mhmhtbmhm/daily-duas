@@ -1,12 +1,17 @@
 """
-publish.py
-- يختار الدعاء المناسب (صباح/ظهر/مساء) بالتناوب بلا تكرار
-- يختار مقطعا صوتيا بالتناوب من مجموعة ملفات صوتية متعددة (assets/audio/)
-  لتفادي نشر نفس الصوت دائما (تنويع يقلل خطر تصنيف المحتوى كمتكرر/spam)
-- يولّد الفيديو (Reel قصير)
-- يرفعه كـ GitHub Release asset (رابط عمومي دائم، بلا أي تأثير على تاريخ Git
-  أو حجم الريبو — الفيديو لا يدخل تاريخ الـ commits إطلاقا)
-- ينشره كـ Reel على Facebook Page و Instagram Business Account، وكذلك على YouTube Shorts
+publish.py — منسّق النشر اليومي (3 فترات) على Facebook / Instagram / YouTube.
+
+  morning   : دعاء/حديث (state: index_morning) — صوت من assets/audio بالتناوب
+  afternoon : «كلمة من القرآن» (Groq + تفسير موثّق + تلاوة)         ← احتياطيًا: دعاء الظهر
+  evening   : التلاوة المتتابعة من أول المصحف بصوت السديس (آية/فيديو) ← احتياطيًا: دعاء المساء
+
+ضمانات الاستمرارية:
+  • لا يتحرك أي مؤشر (دعاء/آية/كلمة) إلا بعد نجاح النشر على منصة واحدة على الأقل.
+  • فشل مسار المحتوى الأساسي يعني تلقائيًا الدعاء الاحتياطي، فلا تمرّ فترة بلا منشور.
+  • حماية من التكرار: فترة نُشرت اليوم تُتخطّى (cron-job.org + جدولة GitHub الاحتياطية لا يتعارضان).
+  • كل فيديو يُفحص بـ ffprobe: لا يُنشر ما يتجاوز 59 ثانية.
+  • دفع state.json يعيد المحاولة مع pull --rebase.
+تجربة محلية:  python publish.py --slot evening --dry --save-state
 """
 import glob
 import os
@@ -121,15 +126,29 @@ def pick_next_audio(state):
     return chosen
 
 
-def git_commit_and_push(filepaths, message):
-    """يضيف الملفات (خفيفة فقط، مثل state.json) للريبو ويقوم بـ commit + push."""
-    subprocess.run(["git", "config", "user.name", "daily-duas-bot"], check=True)
-    subprocess.run(["git", "config", "user.email", "bot@users.noreply.github.com"], check=True)
-    subprocess.run(["git", "add"] + filepaths, check=True)
-    result = subprocess.run(["git", "commit", "-m", message], capture_output=True, text=True)
-    if result.returncode != 0 and "nothing to commit" not in result.stdout:
-        print(result.stdout, result.stderr)
-    subprocess.run(["git", "push"], check=True)
+def _git(*args, check=False):
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=check)
+
+
+def git_commit_and_push(filepaths, message, tries=5):
+    """commit + push مع إعادة محاولة (pull --rebase) عند تعارض الدفع. يرجع True عند النجاح، ولا يرفع استثناءً."""
+    _git("config", "user.name", "daily-duas-bot")
+    _git("config", "user.email", "bot@users.noreply.github.com")
+    _git("add", *filepaths)
+    r = _git("commit", "-m", message)
+    if r.returncode != 0:
+        if "nothing to commit" in (r.stdout + r.stderr):
+            return True
+        print("⚠️  git commit:", r.stdout, r.stderr)
+        return False
+    for i in range(1, tries + 1):
+        if _git("push").returncode == 0:
+            return True
+        print(f"⚠️  git push فشل (محاولة {i}/{tries}) — نعيد المزامنة")
+        _git("pull", "--rebase", "--autostash")
+        time.sleep(4 * i)
+    print("❌ تعذّر دفع state.json — الخطوة الأخيرة في الـ workflow ستعيد المحاولة", file=sys.stderr)
+    return False
 
 
 def _log_response_error(prefix, resp):
@@ -403,92 +422,228 @@ def post_to_instagram(video_url, caption):
     return resp2.json()
 
 
+
+STATE_PATH = os.environ.get("STATE_PATH") or STATE_PATH
+POSTS_DIR = os.environ.get("POSTS_DIR") or POSTS_DIR
+
+
 # ==================== YouTube ====================
 
-def post_to_youtube(video_path, dua_text, source):
+def post_to_youtube(post):
+    import inspect
     from youtube_upload import upload_short
-    title = (dua_text[:80] + "…") if len(dua_text) > 80 else dua_text
-    description = dua_text + (f"\n\n({source})" if source else "") + \
-        "\n\n#دعاء #shorts #اذكار #إسلام"
-    return upload_short(
-        video_path,
-        title=title,
-        description=description,
-        tags=["دعاء", "اذكار", "shorts", "اسلام"],
-    )
+    kw = {"tags": post.tags}
+    params = inspect.signature(upload_short).parameters         # نمرّر فقط ما يدعمه youtube_upload.py الحالي
+    for k, v in (("privacy", os.environ.get("PRIVACY", "public")), ("language", "ar"), ("audio_language", "ar"),
+                 ("made_for_kids", False)):
+        if k in params:
+            kw[k] = v
+    return upload_short(post.video, title=post.title[:100], description=post.description[:4900], **kw)
 
 
-def main():
-    missing = [name for name in ["FB_PAGE_ID", "FB_PAGE_TOKEN", "IG_USER_ID", "GITHUB_REPOSITORY", "GITHUB_TOKEN"]
-               if not os.environ.get(name)]
-    if missing:
-        print(f"⚠️  متغيرات ناقصة: {missing}. سنولّد الفيديو فقط بلا نشر.")
+# ==================== أدوات الاستمرارية ====================
 
+MAX_SECONDS = 59.0           # سقف صارم لأي فيديو يُنشر
+
+
+def retry(fn, tries=3, delay=20, what=""):
+    last = None
+    for i in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:                                   # noqa: BLE001
+            last = e
+            print(f"   ↻ {what} فشل (محاولة {i}/{tries}): {str(e)[:200]}")
+            if i < tries:
+                time.sleep(delay * i)
+    raise last
+
+
+def assert_short(path):
+    """يمنع نشر أي فيديو يتجاوز 59 ثانية أو لا يُقرأ."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                          "default=noprint_wrappers=1:nokey=1", path], capture_output=True, text=True, check=True).stdout
+    dur = float(out.strip())
+    if dur > MAX_SECONDS:
+        raise RuntimeError(f"الفيديو {dur:.1f}ث يتجاوز {MAX_SECONDS:.0f}ث")
+    if dur < 3:
+        raise RuntimeError(f"الفيديو قصير جدًا ({dur:.1f}ث)")
+    return dur
+
+
+VALID_SLOTS = ("morning", "afternoon", "evening")
+
+
+def resolve_slot(raw):
+    raw = (raw or "").strip().lower()
+    if raw in VALID_SLOTS:
+        return raw
+    h = datetime.now(timezone.utc).hour                          # استنتاج الفترة من ساعة UTC عند غياب المُدخل
+    return "morning" if h < 10 else "afternoon" if h < 16 else "evening"
+
+
+# نوع المحتوى لكل فترة (يمكن تغييره من متغيرات المستودع): dua | word | seq
+DEFAULT_MODES = {"morning": "dua", "afternoon": "word", "evening": "seq"}
+
+
+def mode_for(slot):
+    m = os.environ.get(f"{slot.upper()}_MODE", "").strip().lower()
+    return m if m in ("dua", "word", "seq") else DEFAULT_MODES[slot]
+
+
+# ==================== بناة المنشورات ====================
+
+def build_dua(st, slot, duas):
+    from quran.post import Post
+    dua = pick_next_dua(duas, st, slot)
+    audio_path = pick_next_audio(st)
+    print(f"🎵 الصوت: {os.path.basename(audio_path)}")
+    os.makedirs(POSTS_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out = os.path.join(POSTS_DIR, f"dua_{slot}_{stamp}.mp4")
+    generate_dua_video(dua["text"], category=slot, source=dua.get("source", ""), output_path=out, audio_path=audio_path)
+    src = dua.get("source", "")
+    title = (dua["text"][:80] + "…") if len(dua["text"]) > 80 else dua["text"]
+    caption = dua["text"] + (f"\n\n({src})" if src else "") + "\n\n#دعاء #اذكار #إسلام #قرآن #shorts"
+    desc = dua["text"] + (f"\n\n({src})" if src else "") + "\n\n#دعاء #shorts #اذكار #إسلام"
+    return Post(out, title, desc, caption, ["دعاء", "اذكار", "shorts", "اسلام"], f"dua {slot}")
+
+
+def build_word(st, slot, duas):
+    from quran import word
+    return word.build(st, POSTS_DIR)
+
+
+def build_seq(st, slot, duas):
+    from quran import seq
+    return seq.build(st, POSTS_DIR)
+
+
+BUILDERS = {"dua": build_dua, "word": build_word, "seq": build_seq}
+
+
+def build_with_fallback(state, slot, duas):
+    """يجرّب نوع الفترة الأساسي، ثم دعاء الفترة احتياطًا. يرجع (post, state_جديدة). لا يعدّل state الأصلية إلا بالنجاح."""
+    import copy
+    order = [mode_for(slot)] + ([] if mode_for(slot) == "dua" else ["dua"])
+    errors = []
+    for mode in order:
+        st = copy.deepcopy(state)
+        try:
+            print(f"🛠️  بناء ({mode}) للفترة {slot}")
+            post = BUILDERS[mode](st, slot, duas)
+            dur = assert_short(post.video)
+            print(f"✅ الفيديو جاهز: {post.video} ({dur:.1f}ث)")
+            return post, st
+        except Exception as e:                                   # noqa: BLE001
+            errors.append(f"{mode}: {e}")
+            print(f"❌ فشل بناء ({mode}): {e}", file=sys.stderr)
+    raise RuntimeError("فشلت كل المسارات — " + " | ".join(errors))
+
+
+# ==================== النشر ====================
+
+def publish_everywhere(post):
+    """ينشر على كل المنصات المتاحة بشكل مستقل. يرجع (قاموس نتائج، هل أي منصة مفعّلة)."""
+    results = {}
+    fb_ok = all(os.environ.get(n) for n in ("FB_PAGE_ID", "FB_PAGE_TOKEN", "IG_USER_ID", "GITHUB_REPOSITORY", "GITHUB_TOKEN"))
+    yt_ok = all(os.environ.get(n) for n in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"))
+    if fb_ok:
+        video_url = None
+        try:
+            release = retry(get_or_create_media_release, 3, 10, "GitHub release")
+            video_url, _ = retry(lambda: upload_video_asset(release, post.video), 3, 15, "رفع Release")
+            print(f"🔗 {video_url}")
+            try:
+                cleanup_old_release_assets(release["id"])
+            except Exception as e:                               # noqa: BLE001
+                print("⚠️  تنظيف Release:", e)
+            wait_until_url_is_live(video_url, expected_content_prefix="video/")
+        except Exception as e:                                   # noqa: BLE001
+            print("❌ تخزين الفيديو عبر Release:", e, file=sys.stderr)
+        try:
+            r = post_to_facebook(post.video, post.caption)
+            print("✅ Facebook:", r)
+            results["facebook"] = True
+        except Exception as e:                                   # noqa: BLE001
+            print("❌ Facebook:", e, file=sys.stderr)
+            results["facebook"] = False
+        if video_url:
+            try:
+                r = retry(lambda: post_to_instagram(video_url, post.caption), 3, 30, "Instagram")
+                print("✅ Instagram:", r)
+                results["instagram"] = True
+            except Exception as e:                               # noqa: BLE001
+                print("❌ Instagram:", e, file=sys.stderr)
+                results["instagram"] = False
+        else:
+            results["instagram"] = False
+    else:
+        print("⏭️  Facebook/Instagram: متغيرات ناقصة — تخطّي")
+    if yt_ok:
+        try:
+            r = retry(lambda: post_to_youtube(post), 3, 30, "YouTube")
+            print("✅ YouTube:", r.get("id") if isinstance(r, dict) else r)
+            results["youtube"] = True
+        except Exception as e:                                   # noqa: BLE001
+            print("❌ YouTube:", e, file=sys.stderr)
+            results["youtube"] = False
+    else:
+        print("⏭️  YouTube: متغيرات ناقصة — تخطّي")
+    return results, bool(fb_ok or yt_ok)
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--slot", default=os.environ.get("DUA_SLOT", ""))
+    ap.add_argument("--dry", action="store_true", help="يبني الفيديو فقط: بلا نشر ولا git")
+    ap.add_argument("--save-state", action="store_true", help="مع --dry: يحفظ state.json محليًا")
+    ap.add_argument("--force", action="store_true", default=os.environ.get("FORCE", "").lower() == "true",
+                    help="ينشر حتى لو نُشرت هذه الفترة اليوم")
+    args = ap.parse_args(argv)
+
+    slot = resolve_slot(args.slot)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     duas = load_json(DUAS_PATH, [])
     state = load_json(STATE_PATH, {})
+    print(f"▶ الفترة: {slot} — النوع: {mode_for(slot)} — {today}")
 
-    dua = pick_next_dua(duas, state, SLOT)
-    audio_path = pick_next_audio(state)
-    print(f"🎵 الصوت المختار لهذا المنشور: {os.path.basename(audio_path)}")
+    if not args.force and not args.dry and state.get("last_run", {}).get(slot) == today:
+        print(f"⏭️  فترة {slot} نُشرت اليوم أصلًا — لا شيء لفعله (حماية من التكرار).")
+        return 0
 
-    os.makedirs(POSTS_DIR, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    video_filename = f"dua_{SLOT}_{timestamp}.mp4"
-    video_filepath = os.path.join(POSTS_DIR, video_filename)
+    try:
+        post, new_state = build_with_fallback(state, slot, duas)
+    except Exception as e:                                       # noqa: BLE001
+        print("::error::", e, file=sys.stderr)
+        return 1
 
-    generate_dua_video(dua["text"], category=SLOT, source=dua.get("source", ""),
-                        output_path=video_filepath, audio_path=audio_path)
-    print(f"✅ الفيديو تولّد: {video_filepath}")
+    if args.dry:
+        print("🧪 --dry: لا نشر. الفيديو:", post.video)
+        if args.save_state:
+            new_state.setdefault("last_run", {})[slot] = today
+            save_json(STATE_PATH, new_state)
+        return 0
 
-    save_json(STATE_PATH, state)
+    results, configured = publish_everywhere(post)
+    if not configured:
+        print("⏭️  لا توجد منصات مضبوطة — لم تُحفظ الحالة.")
+        return 0
+    if not any(results.values()):
+        print("::error::فشل النشر على كل المنصات", file=sys.stderr)
+        return 1
 
-    # نحفظ فقط state.json في الريبو (ملف صغير، لا يسبب أي تضخم). الفيديو
-    # نفسه لا يدخل git إطلاقا.
-    git_commit_and_push([os.path.relpath(STATE_PATH, BASE_DIR)], f"Auto: state update {timestamp}")
-
-    caption = dua["text"] + (f"\n\n({dua['source']})" if dua.get("source") else "") + \
-        "\n\n#دعاء #اذكار #إسلام #قرآن #shorts"
-
-    if not missing:
-        try:
-            release = get_or_create_media_release()
-            video_url, asset_id = upload_video_asset(release, video_filepath)
-            print(f"🔗 رابط الفيديو (GitHub Release asset): {video_url}")
-
-            # تنظيف الفيديوهات القديمة من نفس الـ Release — يبقيه صغيرا للأبد
-            cleanup_old_release_assets(release["id"])
-
-            wait_until_url_is_live(video_url, expected_content_prefix="video/")
-
-            try:
-                fb_result = post_to_facebook(video_filepath, caption)
-                print("✅ تم النشر على Facebook:", fb_result)
-            except Exception as e:
-                print("❌ خطأ في Facebook (فشلت كل المسارات):", e, file=sys.stderr)
-
-            try:
-                ig_result = post_to_instagram(video_url, caption)
-                print("✅ تم النشر على Instagram:", ig_result)
-            except Exception as e:
-                print("❌ خطأ في Instagram:", e, file=sys.stderr)
-
-        except Exception as e:
-            print("❌ خطأ عام في تخزين/نشر الفيديو عبر GitHub Releases:", e, file=sys.stderr)
-    else:
-        print("⏭️  تم تخطي النشر الفعلي (السكريبت يعمل محليا/تجريبيا).")
-
-    # --- YouTube Short (اختياري، فقط إذا كانت متغيرات YT_* موجودة) ---
-    yt_missing = [name for name in ["YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"]
-                  if not os.environ.get(name)]
-    if not yt_missing:
-        try:
-            yt_result = post_to_youtube(video_filepath, dua["text"], dua.get("source", ""))
-            print("✅ تم النشر على YouTube:", yt_result.get("id"))
-        except Exception as e:
-            print("❌ خطأ في YouTube:", e, file=sys.stderr)
-    else:
-        print(f"⏭️  تم تخطي YouTube (متغيرات ناقصة: {yt_missing})")
+    new_state.setdefault("last_run", {})[slot] = today
+    save_json(STATE_PATH, new_state)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    git_commit_and_push([os.path.relpath(STATE_PATH, BASE_DIR)], f"Auto: state update {stamp} ({post.label})")
+    try:
+        os.remove(post.video)
+    except OSError:
+        pass
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
