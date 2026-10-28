@@ -7,15 +7,15 @@
   "index_morning ": 6,
   "index_audio": 79,
   "qseq": {
-    "surah": 1,
-    "ayah": 2,
+    "surah": 2,
+    "ayah": 1,
     "cycle": 1,
-    "done": 1,
+    "done": 2,
     "skipped": 0,
     "skipped_list": []
   },
   "last_run": {
-    "evening": "2026-10-27",
+    "evening": "2026-10-28",
     "afternoon": "2026-10-28",
     "morning": "2026-10-28"
   },
