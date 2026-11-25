@@ -1,11 +1,11 @@
 {
   "index_general": 1,
   "index_evening": 6,
-  "index_morning": 29,
+  "index_morning": 0,
   "index_afternoon": 5,
   "index_afternoon ": 5,
   "index_morning ": 6,
-  "index_audio": 16,
+  "index_audio": 17,
   "qseq": {
     "surah": 2,
     "ayah": 81,
@@ -19,7 +19,7 @@
   "last_run": {
     "evening": "2026-11-24",
     "afternoon": "2026-11-24",
-    "morning": "2026-11-24"
+    "morning": "2026-11-25"
   },
   "qw_used": [
     "82:13:1",
