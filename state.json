@@ -8,16 +8,16 @@
   "index_audio": 19,
   "qseq": {
     "surah": 2,
-    "ayah": 85,
+    "ayah": 86,
     "cycle": 1,
-    "done": 31,
+    "done": 32,
     "skipped": 1,
     "skipped_list": [
       "2:61"
     ]
   },
   "last_run": {
-    "evening": "2026-11-26",
+    "evening": "2026-11-27",
     "afternoon": "2026-11-27",
     "morning": "2026-11-27"
   },
